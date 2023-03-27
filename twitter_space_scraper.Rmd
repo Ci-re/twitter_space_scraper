@@ -1,0 +1,250 @@
+---
+title: "Twitter_Spaces"
+author: "Cletus Emmanuel"
+date: "2023-01-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r set working directory and load libraries, echo=TRUE}
+
+### Load work directory, Change this path to a path in your pc where you want to save your files and work from
+setwd("../twitter_space_scraper/")
+
+### Load these libraries
+### use install.packages() if these libraries aren't installed e.g
+### install.packages("rvest")
+library(rvest)
+library(httr)
+library(RSelenium)
+library(tidyverse)
+library(wdman)
+library(xml2)
+library(magrittr)
+
+```
+
+
+```{r}
+### This function sets a Sleep time after execution and also close open connection
+CatchupPause <- function(Secs){
+  Sys.sleep(Secs) #pause to let connection work
+  closeAllConnections()
+  gc()
+}
+```
+
+
+
+```{r}
+### I am using firefox as my simulation browser 
+rD <- rsDriver(browser = "chrome", port = 3000L, chromever = "111.0.5563.41")
+
+sel <- wdman::selenium(browser = "chrome", port = 3000L)
+sel$log()
+driver <- rD[["client"]]
+
+```
+
+
+```{r}
+### Navigate to this link to get the list of spaces that are live at the moment
+driver$navigate("https://spacesdashboard.com/?lang=&mode=top")
+
+
+### Setting global variables to work with
+data_collected_total <- data.frame()
+pagesource <- driver$getPageSource()
+Sys.sleep(2)
+pagesource_html <- read_html(pagesource[[1]])
+
+### Total number of pages to scrape
+last <- pagesource_html |> 
+  html_elements(xpath = "/html/body/div[2]/main/div/div/div/div[3]/div[2]/div/nav/div[2]/div[2]/span/span[14]/button") |> 
+  html_text() |> 
+  stringr::str_replace_all(pattern = "[\n, \r]", replacement = " ") |> 
+  str_trim() |> 
+  as.numeric()
+
+```
+
+```{r}
+##### First function to scrape live twitter spaces
+
+scrape_twitter_spaces <- function(source){
+  source_html <- source
+  tab <- source_html |> html_elements("tr") |> 
+    html_elements(".text-gray-500") |> 
+    html_text() |> 
+    stringr::str_replace_all(pattern = "[\n, \r]", replacement = " ") |> 
+    str_trim()
+  
+  tab <- tab[str_detect(tab, "@")]
+  index <- which(seq(1:length(tab)) %% 2 == 0)
+  tab <- tab[index]
+  tab2 <- tab |> str_trim(side = "both") |> str_split(" ")
+  hosts <- c()
+  for(i in 1:length(tab2)){
+    hosts[length(hosts) + 1] <- tab2[[i]][1]
+  }
+  hosts <- hosts[!is.na(hosts)]
+  
+  space_name <- source_html |> html_elements("tr") |> 
+    html_elements(".text-md") |> 
+    html_element("a") |> 
+    html_text() |> 
+    str_trim()
+  
+  space_link <- source_html |> html_elements("tr") |> 
+    html_node(".animate-pulse.text-red-500.border.border-red-500") |> 
+    html_attr("href") |> 
+    unique()
+  
+  time_started <- source_html |> html_elements("tr") |> 
+    html_node(".text-sm.text-gray-400.py-1")
+  
+  time_started <- time_started[!is.na(time_started)] |>
+    html_text() |> 
+    stringr::str_replace_all(pattern = "[\n, \r]", replacement = "") |> 
+    str_trim() |> 
+    str_split("-")
+  
+  time_st <- c()
+  for(i in 1:length(time_started)){
+    time_st[length(time_st) + 1] <- lapply(time_started[i], function(k){
+      k[str_detect(k, "Started")]
+    })
+  }
+  time_st <- time_st |> unlist()
+  
+  space_dataframe <- data.frame(
+    host = hosts, 
+    space_name = space_name, 
+    start_time = time_st,
+    link = space_link
+  )
+}
+
+```
+
+```{r}
+#### Executing scrape_twitter_spaces
+#### Starting with the base url
+data_collected_total <- scrape_twitter_spaces(pagesource_html)
+
+### Scrape the rest of the pages
+
+### I use Sys.sleep() at intervals, to reduce the work load on the processor and to also let some pages finish loading in the background
+
+url_old <- ""
+
+for(i in 1:last){
+  print(paste0("Scraping ",i, " of ",last))
+  element <- driver$findElement("xpath", "/html/body/div[2]/main/div/div/div/div[3]/div[2]/div/nav/div[2]/div[2]/span/span[15]/button")
+  Sys.sleep(3)
+  element$clickElement()
+  Sys.sleep(5)
+  current_url <- driver$getCurrentUrl()
+  while (identical(current_url, url_old)) {
+    element$clickElement()
+    Sys.sleep(5)
+    current_url <- driver$getCurrentUrl()
+  }
+  pagesource <- driver$getPageSource()
+  Sys.sleep(3)
+  pagesource_html <- read_html(pagesource[[1]])
+  downloaded_data <- scrape_twitter_spaces(pagesource_html)
+  data_collected_total <- bind_rows(data_collected_total, downloaded_data)
+  url_old <- current_url
+  Sys.sleep(2)
+}
+
+
+
+### Final data with unduplicated rows
+live_twitter_spaces_data <- data_collected_total[!duplicated(data_collected_total$host),]
+
+
+### Write to excel file
+WriteXLS::WriteXLS(
+  x = live_twitter_spaces_data, 
+  ExcelFileName ="twitter_spaces_live.xlsx", perl = "C:\\Users\\ZBOOK\\AppData\\Local\\activestate\\cache\\bin\\perl.exe"
+)
+
+
+```
+
+
+Scraping upcoming spaces
+```{r}
+### Function to scrape_scheduled spaces
+scrape_twitter_spaces_scheduled <- function(source){
+  pagesource_html_sch <- source
+  tab <- pagesource_html_sch |> html_elements("tr") |> 
+    html_elements(".text-gray-500") |> 
+    html_text() |> 
+    stringr::str_replace_all(pattern = "[\n, \r]", replacement = " ") |> 
+    str_trim()
+  
+  tab <- tab[str_detect(tab, "@")]
+  index <- which(seq(1:length(tab)) %% 2 == 0)
+  tab <- tab[index]
+  tab2 <- tab |> str_trim(side = "both") |> str_split(" ")
+  hosts <- c()
+  for(i in 1:length(tab2)){
+    hosts[length(hosts) + 1] <- tab2[[i]][1]
+  }
+  hosts <- hosts[!is.na(hosts)]
+  
+  space_name <- pagesource_html_sch |> 
+    html_elements(css = "tr") |> 
+    html_elements(".text-md.text-gray-900.font-bold.break-normal") |> 
+    html_text() |> 
+    stringr::str_replace_all(pattern = "[\n, \r]", replacement = " ") |> 
+    str_trim("both")
+    
+  
+  space_link <- pagesource_html_sch |> html_elements("tr") |> 
+    html_node(".text-indigo-500.border.border-indigo-500.uppercase.text-xs.px-2.py-1") |> 
+    html_attr("href") |> 
+    unique()
+  
+  time_started <- pagesource_html_sch |> html_elements("tr") |> 
+    html_node(".text-sm.text-gray-400.py-1") |> 
+    html_text() |> 
+    stringr::str_replace_all(pattern = "[\n, \r]", replacement = " ") |> 
+    str_remove_all("-") |> 
+    str_trim()
+  
+  time_scheduled <- time_started[!is.na(time_started)]
+  
+  space_dataframe <- data.frame(
+    host = hosts, 
+    space_name = space_name, 
+    start_time = time_scheduled,
+    link = space_link
+  )
+}
+
+```
+
+
+```{r}
+### Navigate to link and scrape the scheduled spaces
+
+driver$navigate("https://spacesdashboard.com/upcoming?lang=&mode=popular")
+pagesource <- driver$getPageSource()
+pagesource_html_sch <- read_html(pagesource[[1]])
+data_collected_total_scheduled <- scrape_twitter_spaces_scheduled(pagesource_html_sch)
+
+CatchupPause(3)
+WriteXLS::WriteXLS(
+  x = data_collected_total_scheduled, 
+  ExcelFileName ="twitter_spaces_scheduled.xlsx"
+)
+
+```
+
